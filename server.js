@@ -98,3 +98,103 @@ function sanitizeDb(db) {
 
 function json(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(payload));
+}
+
+function text(res, status, payload) {
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(payload);
+}
+
+function pdf(res, filename, contentBuffer) {
+  res.writeHead(200, {
+    "Content-Type": "application/pdf",
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Cache-Control": "no-store",
+    "Content-Length": contentBuffer.length
+  });
+  res.end(contentBuffer);
+}
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || "").split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf("=");
+    if (idx === -1) continue;
+    out[trimmed.slice(0, idx)] = decodeURIComponent(trimmed.slice(idx + 1));
+  }
+  return out;
+}
+
+function setCookie(res, name, value, maxAge) {
+  const parts = [`${name}=${encodeURIComponent(value)}`, "Path=/", "HttpOnly", "SameSite=Lax"];
+  if (maxAge !== undefined) parts.push(`Max-Age=${maxAge}`);
+  if (process.env.NODE_ENV === "production") parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 2 * 1024 * 1024) {
+        reject(new Error("Plik jest za duzy."));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch (_) {
+        reject(new Error("Niepoprawny JSON."));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function getCurrentUser(req, db) {
+  const cookies = parseCookies(req);
+  const token = cookies.brew_sid;
+  if (!token || !sessions.has(token)) return null;
+  const session = sessions.get(token);
+  if (session.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  session.expiresAt = Date.now() + SESSION_TTL_MS;
+  session.lastSeenAt = nowIso();
+  return db.users.find((user) => user.id === session.userId) || null;
+}
+
+function listOnlineUsers(db) {
+  const now = Date.now();
+  const unique = new Map();
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt < now) {
+      sessions.delete(token);
+      continue;
+    }
+    const user = db.users.find((entry) => entry.id === session.userId);
+    if (!user || unique.has(user.id)) continue;
+    unique.set(user.id, {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+      lastSeenAt: session.lastSeenAt || nowIso()
+    });
+  }
+  return Array.from(unique.values()).sort((a, b) => (b.lastSeenAt || "").localeCompare(a.lastSeenAt || ""));
+}
+
+function requireAuth(req, res, db) {
+  const user = getCurrentUser(req, db);
+  if (!user) {
+    json(res, 401, { error: "Sesja wygasla. Zaloguj sie ponownie." });
+    return null;
+  }
+  return user;
+}
