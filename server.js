@@ -10,7 +10,7 @@ const HOST = "0.0.0.0";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const EMAIL_NOTIFY_TO = process.env.EMAIL_NOTIFY_TO || "biznes.kapixon@gmail.com";
 const EMAIL_FROM = process.env.EMAIL_FROM || "Browar Panel <onboarding@resend.dev>";
-const RESEND_API_KEY = process.env.RESEND_API_KEY || "re_QrBmCPid_FocQrUAQnonGJ8HGeBjmXLvB";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "re_PfRuV1Ra_9erMDoJcAHcM5n68njBgqLNJ";
 const sessions = new Map();
 
 function nowIso() {
