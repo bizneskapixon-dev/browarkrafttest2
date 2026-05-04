@@ -8,6 +8,9 @@ const DB_PATH = path.join(ROOT, "brew-panel-db.json");
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const EMAIL_NOTIFY_TO = process.env.EMAIL_NOTIFY_TO || "biznes.kapixon@gmail.com";
+const EMAIL_FROM = process.env.EMAIL_FROM || "Browar Panel <onboarding@resend.dev>";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "re_QrBmCPid_FocQrUAQnonGJ8HGeBjmXLvB";
 const sessions = new Map();
 
 function nowIso() {
@@ -279,6 +282,15 @@ function fmtQty(value) {
   return num.toLocaleString("pl-PL", { maximumFractionDigits: 3 });
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function normalizeReservationItems(item) {
   if (Array.isArray(item?.items)) {
     return item.items
@@ -296,6 +308,95 @@ function normalizeReservationItems(item) {
 
 function normalizeReservationFulfillment(item) {
   return Array.isArray(item?.fulfillment) ? item.fulfillment : [];
+}
+
+function buildReservationNotification(reservation, db) {
+  const productById = new Map((db.products || []).map((item) => [item.id, item]));
+  const items = normalizeReservationItems(reservation);
+  const fulfillment = normalizeReservationFulfillment(reservation);
+  const inventoryLines = [];
+  const tankLines = [];
+
+  if (fulfillment.length > 0) {
+    for (const entry of fulfillment) {
+      const product = productById.get(entry.productId);
+      const unit = product?.unit || "szt";
+      const productName = entry.productName || product?.name || "Produkt";
+      if (Number(entry.fromProductQty || 0) > 0) {
+        inventoryLines.push(`${productName}: ${fmtQty(entry.fromProductQty)} ${unit}`);
+      }
+      if (Number(entry.fromTankQty || 0) > 0) {
+        const tanks = (entry.tankAllocations || [])
+          .map((tank) => `${tank.tankName || "tank"} ${fmtQty(tank.quantityHl)} hl`)
+          .join(", ");
+        tankLines.push(`${productName}: ${fmtQty(entry.fromTankQty)} ${unit}${tanks ? `; tanki: ${tanks}` : ""}`);
+      }
+    }
+  } else {
+    for (const entry of items) {
+      const product = productById.get(entry.productId);
+      inventoryLines.push(`${product?.name || "Produkt"}: ${fmtQty(entry.qty)} ${product?.unit || "szt"}`);
+    }
+  }
+
+  const subject = `Nowa rezerwacja - ${reservation.customerName || "bez klienta"} - ${reservation.pickupBy || "bez daty"}`;
+  const text = [
+    "Nowa rezerwacja w Browar Panel",
+    "",
+    `Klient: ${reservation.customerName || "-"}`,
+    `Kontakt: ${reservation.customerContact || "-"}`,
+    `Odbior: ${reservation.pickupBy || "-"}`,
+    "",
+    "Rzeczy z magazynu:",
+    ...(inventoryLines.length ? inventoryLines.map((line) => `- ${line}`) : ["- Brak"]),
+    "",
+    "Rzeczy z tanka:",
+    ...(tankLines.length ? tankLines.map((line) => `- ${line}`) : ["- Brak"]),
+    "",
+    "Notatki:",
+    reservation.notes || "- Brak"
+  ].join("\n");
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+      <h2>Nowa rezerwacja w Browar Panel</h2>
+      <p><strong>Klient:</strong> ${escapeHtml(reservation.customerName || "-")}<br/>
+      <strong>Kontakt:</strong> ${escapeHtml(reservation.customerContact || "-")}<br/>
+      <strong>Odbior:</strong> ${escapeHtml(reservation.pickupBy || "-")}</p>
+      <h3>Rzeczy z magazynu</h3>
+      <ul>${(inventoryLines.length ? inventoryLines : ["Brak"]).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+      <h3>Rzeczy z tanka</h3>
+      <ul>${(tankLines.length ? tankLines : ["Brak"]).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+      <h3>Notatki</h3>
+      <p>${escapeHtml(reservation.notes || "- Brak")}</p>
+    </div>
+  `;
+
+  return { subject, text, html };
+}
+
+async function sendReservationEmail(reservation, db) {
+  if (!RESEND_API_KEY) throw new Error("Brak RESEND_API_KEY.");
+  if (!EMAIL_FROM) throw new Error("Brak EMAIL_FROM.");
+  const email = buildReservationNotification(reservation, db);
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from: EMAIL_FROM,
+      to: [EMAIL_NOTIFY_TO],
+      subject: email.subject,
+      html: email.html,
+      text: email.text
+    })
+  });
+  if (!response.ok) {
+    const payload = await response.text();
+    throw new Error(`Email API error: ${payload}`);
+  }
 }
 
 function asciiPdfText(value) {
@@ -564,6 +665,17 @@ async function handleApi(req, res, db) {
     const report = buildDailyReservationReport(db, dateValue);
     const pdfBuffer = buildSimplePdfBuffer(report.lines);
     return pdf(res, `rezerwacje-${dateValue}.pdf`, pdfBuffer);
+  }
+
+  if (req.url === "/api/reservations/notify" && req.method === "POST") {
+    const user = requireAuth(req, res, db);
+    if (!user) return true;
+    const body = await readJsonBody(req);
+    const reservationId = String(body.reservationId || "");
+    const reservation = (db.reservations || []).find((item) => item.id === reservationId);
+    if (!reservation) return json(res, 404, { error: "Nie znaleziono rezerwacji." });
+    await sendReservationEmail(reservation, db);
+    return json(res, 200, { ok: true });
   }
 
   if (req.url === "/api/online" && req.method === "GET") {
