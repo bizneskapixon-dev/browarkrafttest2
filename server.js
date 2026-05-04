@@ -8,9 +8,9 @@ const DB_PATH = path.join(ROOT, "brew-panel-db.json");
 const PORT = Number(process.env.PORT || 3000);
 const HOST = "0.0.0.0";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const EMAIL_NOTIFY_TO = process.env.EMAIL_NOTIFY_TO || "mateuszkraftwerk@gmail.com";
+const EMAIL_NOTIFY_TO = process.env.EMAIL_NOTIFY_TO || "panelkraftwerk@int.pl";
 const EMAIL_FROM = process.env.EMAIL_FROM || "Browar Panel <onboarding@resend.dev>";
-const RESEND_API_KEY = process.env.RESEND_API_KEY || "re_dTQQgH2v_KN8trPsxoxxXsZJ2GmxcnGpk";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "re_jf32rntR_LDXEjxhs22g66J71zdLzSeiG";
 const sessions = new Map();
 
 function nowIso() {
